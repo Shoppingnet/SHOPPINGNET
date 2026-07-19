@@ -150,15 +150,11 @@ if ($res) {
         $qty = (float) $r['qty'];
         if ($qty <= 0) { $qty = 1; }
 
-        // price: net sale price (stored price minus delivery). If the sale has no
-        // recorded price, fall back to the product's catalog price.
+        // net product price = stored sale price minus the delivery fee.
+        // A 0 / empty sale price stays 0 on purpose (the order may be returned).
         $gross = (float) $r['price'];
-        if ($gross > 0) {
-            $price = $gross - (float) $r['livr'];
-            if ($price < 0) { $price = $gross; }   // safety if livr looks wrong
-        } else {
-            $price = $info ? $info['price'] : 0;    // no sale price -> catalog price
-        }
+        $price = $gross - (float) $r['livr'];
+        if ($price < 0) { $price = $gross; }   // safety: never go negative
         $price = round($price, 2);
         $out[] = array(
             'external_id' => (string) $r['external_id'],
