@@ -122,7 +122,8 @@ $sql = "SELECT l.id                AS external_id,
                DATE(l.delivred_at) AS `date`,
                l.product           AS product,
                l.quantity          AS qty,
-               l.price             AS price
+               l.price             AS price,
+               l.prix_de_laivraison AS livr
         FROM `lists` l
         WHERE l.delivred_at IS NOT NULL
           AND l.canceled_at IS NULL
@@ -146,13 +147,17 @@ if ($res) {
         }
         $qty = (float) $r['qty'];
         if ($qty <= 0) { $qty = 1; }
+        // net product price = stored price minus the delivery fee (livraison)
+        $price = (float) $r['price'] - (float) $r['livr'];
+        if ($price < 0) { $price = (float) $r['price']; }   // safety if livr looks wrong
+        $price = round($price, 2);
         $out[] = array(
             'external_id' => (string) $r['external_id'],
             'date'        => (string) $r['date'],
             'product'     => $product,
             'ref'         => $ref,
             'qty'         => $qty,
-            'price'       => (float) $r['price'],
+            'price'       => $price,
         );
     }
 }
