@@ -142,4 +142,7 @@ if ($res) {
     }
 }
 
-echo json_encode($out, JSON_UNESCAPED_UNICODE);
+// Escape non-ASCII as \uXXXX (JSON_UNESCAPED_UNICODE removed on purpose) so the
+// Arabic survives any client/DB that is not configured for UTF-8. Slashes stay
+// readable.
+echo json_encode($out, JSON_UNESCAPED_SLASHES);
