@@ -108,6 +108,7 @@ if (!$cn) {
     exit;
 }
 mysqli_set_charset($cn, 'utf8mb4');
+mysqli_query($cn, "SET NAMES utf8mb4");   // belt-and-suspenders UTF-8 on the connection
 
 // --- delivered orders, with product reference from `products` ---
 $sql = "SELECT l.id                    AS external_id,
@@ -142,7 +143,5 @@ if ($res) {
     }
 }
 
-// Escape non-ASCII as \uXXXX (JSON_UNESCAPED_UNICODE removed on purpose) so the
-// Arabic survives any client/DB that is not configured for UTF-8. Slashes stay
-// readable.
-echo json_encode($out, JSON_UNESCAPED_SLASHES);
+// Raw UTF-8 output (proper Arabic), unescaped slashes for clean URLs/text.
+echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
