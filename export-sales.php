@@ -102,18 +102,18 @@ if (!$cn) { http_response_code(500); echo '[]'; exit; }
 mysqli_set_charset($cn, 'utf8mb4');
 mysqli_query($cn, "SET NAMES utf8mb4");
 
-// --- build product-name -> reference map (exact + normalised keys) ---
-$refByName = array();   // exact name
-$refByNorm = array();   // normalised name
-$pr = mysqli_query($cn, "SELECT name, reference FROM `products` WHERE reference IS NOT NULL AND reference <> ''");
+// --- build product-name -> {ref, price} map (exact + normalised keys) ---
+$prodByName = array();   // exact name
+$prodByNorm = array();   // normalised name
+$pr = mysqli_query($cn, "SELECT name, reference, price FROM `products`");
 if ($pr) {
     while ($row = mysqli_fetch_assoc($pr)) {
-        $nm  = (string) $row['name'];
-        $ref = (string) $row['reference'];
+        $nm = (string) $row['name'];
         if ($nm === '') { continue; }
-        if (!isset($refByName[$nm])) { $refByName[$nm] = $ref; }
+        $info = array('ref' => (string) $row['reference'], 'price' => (float) $row['price']);
+        if (!isset($prodByName[$nm])) { $prodByName[$nm] = $info; }
         $k = norm_name($nm);
-        if ($k !== '' && !isset($refByNorm[$k])) { $refByNorm[$k] = $ref; }
+        if ($k !== '' && !isset($prodByNorm[$k])) { $prodByNorm[$k] = $info; }
     }
 }
 
@@ -137,19 +137,28 @@ $out = array();
 if ($res) {
     while ($r = mysqli_fetch_assoc($res)) {
         $product = (string) $r['product'];
-        // resolve ref: exact name first, then normalised name
-        $ref = '';
-        if ($product !== '' && isset($refByName[$product])) {
-            $ref = $refByName[$product];
+        // resolve product info (ref + catalog price): exact name first, then normalised
+        $info = null;
+        if ($product !== '' && isset($prodByName[$product])) {
+            $info = $prodByName[$product];
         } else {
             $k = norm_name($product);
-            if ($k !== '' && isset($refByNorm[$k])) { $ref = $refByNorm[$k]; }
+            if ($k !== '' && isset($prodByNorm[$k])) { $info = $prodByNorm[$k]; }
         }
+        $ref = $info ? $info['ref'] : '';
+
         $qty = (float) $r['qty'];
         if ($qty <= 0) { $qty = 1; }
-        // net product price = stored price minus the delivery fee (livraison)
-        $price = (float) $r['price'] - (float) $r['livr'];
-        if ($price < 0) { $price = (float) $r['price']; }   // safety if livr looks wrong
+
+        // price: net sale price (stored price minus delivery). If the sale has no
+        // recorded price, fall back to the product's catalog price.
+        $gross = (float) $r['price'];
+        if ($gross > 0) {
+            $price = $gross - (float) $r['livr'];
+            if ($price < 0) { $price = $gross; }   // safety if livr looks wrong
+        } else {
+            $price = $info ? $info['price'] : 0;    // no sale price -> catalog price
+        }
         $price = round($price, 2);
         $out[] = array(
             'external_id' => (string) $r['external_id'],
