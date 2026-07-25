@@ -178,30 +178,45 @@ if ($res) {
         }
         if ($info) { $ref = $info['ref']; }
 
-        // `lists.price` is the order TOTAL montant (COD, incl. delivery); e.g.
-        // order 651837 stores 349 = exactly what imrashop shows. `lists.quantity`
-        // is UNRELIABLE — for many rows it holds the amount (349) instead of the
-        // item count, yet genuine multi-item orders hold a real small count (2).
+        // DATA MODEL (both columns are varchar in `lists`):
+        //   price     = the order TOTAL montant (COD, delivery included). e.g. order
+        //               651837 stores "349" = exactly what imrashop shows.
+        //   quantity  = a human-readable label, NOT a number, e.g.
+        //               "منتج واحد ب 349 درهم" ("one product at 349 dirham"). The
+        //               number inside it is the UNIT price. So the real item count is
+        //               count = round(montant / unit_price).
         //
         // TOP JEMLA computes revenue = price * qty, so we send:
-        //   qty   = trustworthy item count (guarded against corrupted rows)
-        //   price = unit price = net montant / qty
-        // => revenue = qty * unit = net montant  (matches imrashop, delivery excl.)
+        //   qty   = real item count (derived above)
+        //   price = net unit price = (montant - delivery) / count
+        // => revenue = qty * price = net montant (matches imrashop, delivery excl.)
 
-        // net sale (without the delivery fee). Empty/0 stays 0 (order may be returned).
+        // order total. `price` is varchar and old rows can hold junk (huge numbers,
+        // negatives); guard so one corrupt row can't blow up the daily total.
         $montant = (float) $r['price'];
-        $livr    = (float) $r['livr'];
-        $net     = $montant - $livr;
-        if ($net < 0) { $net = $montant; }        // bogus delivery fee -> keep gross
-        $net     = round($net, 2);
+        if ($montant < 0 || $montant > 100000) { $montant = 0; }   // corrupt -> neutralise
+        $livr = (float) $r['livr'];
+        $net  = $montant - $livr;
+        if ($net < 0) { $net = $montant; }            // bogus delivery fee -> keep gross
+        $net  = round($net, 2);
 
-        // real item count. A raw quantity that is implausibly large, or that is
-        // >= the montant, is the "amount-in-the-count-column" corruption -> treat
-        // as 1. A small value (2, 3, ...) is a genuine multi-item order.
-        $count = (int) $r['qty'];
-        if ($count < 1 || $count > 20 || $count >= $montant) { $count = 1; }
+        // unit price = the number inside the `quantity` label (prefer the one just
+        // before "درهم"; fall back to the first number in the string).
+        $qtxt = (string) $r['qty'];
+        $unit = 0.0;
+        if (preg_match('/([0-9]+(?:[.,][0-9]+)?)\s*درهم/u', $qtxt, $mm) ||
+            preg_match('/([0-9]+(?:[.,][0-9]+)?)/', $qtxt, $mm)) {
+            $unit = (float) str_replace(',', '.', $mm[1]);
+        }
 
-        // unit price so that unit * count == net montant.
+        // count = round(total / unit), guarded to a sane 1..50 range (default 1).
+        $count = 1;
+        if ($unit > 0 && $montant > 0) {
+            $c = (int) round($montant / $unit);
+            if ($c >= 1 && $c <= 50) { $count = $c; }
+        }
+
+        // net unit price so that price * count == net montant.
         $qty   = $count;
         $price = ($count > 0) ? round($net / $count, 2) : $net;
 
@@ -234,9 +249,9 @@ if ($res) {
                 'quantity_raw'=> (string) $r['qty'],   // exactly what `lists.quantity` holds
                 'montant'     => $montant,             // `lists.price` (order total, COD)
                 'livr'        => $livr,
-                'qty_sent'    => $qty,                 // count we send after the guard
-                'price_sent'  => $price,               // unit price we send
-                'clamped'     => ((int) $r['qty'] !== $qty) ? 1 : 0,
+                'unit'        => $unit,                // unit price parsed from the label
+                'qty_sent'    => $qty,                 // real item count we send
+                'price_sent'  => $price,               // net unit price we send
             );
         }
     }
@@ -255,14 +270,11 @@ if ($DEBUG) {
         $k = $d['ref'] !== '' ? $d['ref'] : ('(no-ref) ' . $d['product']);
         if (!isset($agg[$k])) {
             $agg[$k] = array('ref' => $d['ref'], 'product' => $d['product'],
-                             'lines' => 0, 'qty_raw_sum' => 0, 'qty_sent_sum' => 0,
-                             'revenue_sent' => 0.0, 'clamped_lines' => 0);
+                             'lines' => 0, 'qty_sent_sum' => 0, 'revenue_sent' => 0.0);
         }
         $agg[$k]['lines']++;
-        $agg[$k]['qty_raw_sum']  += (int) $d['quantity_raw'];
         $agg[$k]['qty_sent_sum'] += (int) $d['qty_sent'];
         $agg[$k]['revenue_sent'] += (float) $d['qty_sent'] * (float) $d['price_sent'];
-        $agg[$k]['clamped_lines']+= (int) $d['clamped'];
     }
     foreach ($agg as &$a) { $a['revenue_sent'] = round($a['revenue_sent'], 2); }
     unset($a);
