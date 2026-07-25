@@ -210,8 +210,7 @@ if ($res) {
         //               total, not the count.
         //
         // TOP JEMLA computes revenue = price * qty, so we send:
-        //   qty   = real item count (parsed from the label word) -> matches imrashop
-        //   price = net unit price = (montant - delivery) / count
+        //   qty   = real item count      price = net unit price = (montant-delivery)/count
         // => revenue = qty * price = net montant (delivery excl.), independent of count
 
         // order line total. `price` is varchar and old rows can hold junk (huge
@@ -223,8 +222,18 @@ if ($res) {
         if ($net < 0) { $net = $montant; }            // bogus delivery fee -> keep gross
         $net  = round($net, 2);
 
-        // real item count parsed from the Arabic label ("واحد"=1, "...جين"=2, "3 ..."=3)
-        $count = parse_count($r['qty']);
+        // Item count — two candidate methods (imrashop uses the catalog one):
+        //   word : parse the label ("واحد"=1, "...جين"=2, "3 ..."=3)
+        //   cat  : round(montant / catalog_unit_price) from the `products` table
+        $countWord = parse_count($r['qty']);
+        $catalog   = ($info && isset($info['price'])) ? (float) $info['price'] : 0.0;
+        $countCat  = 0;
+        if ($catalog > 0 && $montant > 0) {
+            $cc = (int) round($montant / $catalog);
+            if ($cc >= 1 && $cc <= 50) { $countCat = $cc; }
+        }
+        // primary: catalog-based; fall back to the label word, then 1.
+        $count = $countCat > 0 ? $countCat : ($countWord > 0 ? $countWord : 1);
 
         // net unit price so that price * count == net montant.
         $qty   = $count;
@@ -259,7 +268,10 @@ if ($res) {
                 'quantity_raw'=> (string) $r['qty'],   // exactly what `lists.quantity` holds
                 'montant'     => $montant,             // `lists.price` (order total, COD)
                 'livr'        => $livr,
-                'qty_sent'    => $qty,                 // real item count (parsed from label)
+                'catalog'     => $catalog,             // products.price (catalog unit price)
+                'qty_word'    => $countWord,           // count from the label word
+                'qty_cat'     => $countCat,            // round(montant / catalog)
+                'qty_sent'    => $qty,                 // the one we actually send
                 'price_sent'  => $price,               // net unit price we send
             );
         }
@@ -291,19 +303,24 @@ if ($DEBUG) {
     // sort by line count desc so the busiest products are first
     usort($summary, function ($x, $y) { return $y['lines'] - $x['lines']; });
 
-    $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0;
+    $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0; $totalWord = 0; $totalCat = 0;
     foreach ($dbgRows as $d) {
         $totalRevenue += (float) $d['qty_sent'] * (float) $d['price_sent'];
-        $totalLines++; $totalQty += (int) $d['qty_sent'];
+        $totalLines++;
+        $totalQty  += (int) $d['qty_sent'];
+        $totalWord += (int) $d['qty_word'];
+        $totalCat  += (int) ($d['qty_cat'] > 0 ? $d['qty_cat'] : 1);
     }
 
     echo json_encode(array(
-        'condition'      => $cond,
-        'total_lines'    => $totalLines,
-        'total_qty_sent' => $totalQty,
-        'total_revenue'  => round($totalRevenue, 2),
-        'by_ref'         => $summary,
-        'rows'           => ($refFilt !== '') ? $dbgRows : 'add &ref=SNxxxx to see per-line detail',
+        'condition'         => $cond,
+        'total_lines'       => $totalLines,
+        'total_qty_sent'    => $totalQty,   // whichever method is active
+        'total_qty_by_word' => $totalWord,  // label-word method
+        'total_qty_by_cat'  => $totalCat,   // montant/catalog method  <-- compare to imrashop
+        'total_revenue'     => round($totalRevenue, 2),
+        'by_ref'            => $summary,
+        'rows'              => ($refFilt !== '') ? $dbgRows : 'add &ref=SNxxxx to see per-line detail',
     ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
     exit;
 }
