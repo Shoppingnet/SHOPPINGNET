@@ -167,8 +167,11 @@ if ($res) {
         }
         if ($info) { $ref = $info['ref']; }
 
-        $qty = (float) $r['qty'];
-        if ($qty <= 0) { $qty = 1; }
+        // `lists.quantity` is UNRELIABLE — for many orders it holds the amount
+        // (e.g. 349) instead of the item count, and `price` is the order TOTAL
+        // (montant), not a unit price. TOP JEMLA computes revenue = price * qty,
+        // so we send qty = 1: revenue = price = the order's real total.
+        $qty = 1;
 
         // net product price = stored sale price minus the delivery fee.
         // A 0 / empty sale price stays 0 on purpose (the order may be returned).
