@@ -17,7 +17,9 @@
  *     qty, price, customer, phone, city, employee, image }
  *
  *   - date          = delivery/distribution date (revenue day) = DATE(delivred_at)
- *   - price         = net product price = sale price minus the delivery fee
+ *   - qty           = trustworthy item count (corrupted quantity rows -> 1)
+ *   - price         = unit price = (order total - delivery) / qty
+ *                     => qty * price = net montant (matches imrashop, delivery excl.)
  *   - ref (SKU)     = resolved from the `products` catalog by normalised name
  *
  * "Delivered" = the order's `delivred_at` is set (and not cancelled/deleted).
@@ -167,18 +169,32 @@ if ($res) {
         }
         if ($info) { $ref = $info['ref']; }
 
-        // `lists.quantity` is UNRELIABLE — for many orders it holds the amount
-        // (e.g. 349) instead of the item count, and `price` is the order TOTAL
-        // (montant), not a unit price. TOP JEMLA computes revenue = price * qty,
-        // so we send qty = 1: revenue = price = the order's real total.
-        $qty = 1;
+        // `lists.price` is the order TOTAL montant (COD, incl. delivery); e.g.
+        // order 651837 stores 349 = exactly what imrashop shows. `lists.quantity`
+        // is UNRELIABLE — for many rows it holds the amount (349) instead of the
+        // item count, yet genuine multi-item orders hold a real small count (2).
+        //
+        // TOP JEMLA computes revenue = price * qty, so we send:
+        //   qty   = trustworthy item count (guarded against corrupted rows)
+        //   price = unit price = net montant / qty
+        // => revenue = qty * unit = net montant  (matches imrashop, delivery excl.)
 
-        // net product price = stored sale price minus the delivery fee.
-        // A 0 / empty sale price stays 0 on purpose (the order may be returned).
-        $gross = (float) $r['price'];
-        $price = $gross - (float) $r['livr'];
-        if ($price < 0) { $price = $gross; }
-        $price = round($price, 2);
+        // net sale (without the delivery fee). Empty/0 stays 0 (order may be returned).
+        $montant = (float) $r['price'];
+        $livr    = (float) $r['livr'];
+        $net     = $montant - $livr;
+        if ($net < 0) { $net = $montant; }        // bogus delivery fee -> keep gross
+        $net     = round($net, 2);
+
+        // real item count. A raw quantity that is implausibly large, or that is
+        // >= the montant, is the "amount-in-the-count-column" corruption -> treat
+        // as 1. A small value (2, 3, ...) is a genuine multi-item order.
+        $count = (int) $r['qty'];
+        if ($count < 1 || $count > 20 || $count >= $montant) { $count = 1; }
+
+        // unit price so that unit * count == net montant.
+        $qty   = $count;
+        $price = ($count > 0) ? round($net / $count, 2) : $net;
 
         $ddate = (string) $r['delivered_date'];
         $orderNo = (string) $r['order_no'];
