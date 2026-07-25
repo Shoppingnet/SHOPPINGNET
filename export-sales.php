@@ -83,6 +83,29 @@ function clean_product($s) {
     $s = preg_replace('/\s+\d*\s*[xX]\s*$/u', '', $s);   // trailing " x" / " 1x"
     return trim($s);
 }
+// Item count from the `lists.quantity` label. That column is human text, e.g.
+//   "منتوج واحد ب 199 درهم"  -> 1   (واحد)
+//   "منتوجين ب 298 درهم"     -> 2   (dual form, ...جين)
+//   "3 منتوجات ب 417 درهم"   -> 3   (leading digit)
+// The number after "ب" is the LINE TOTAL, not the count, so it is ignored here.
+function parse_count($txt) {
+    $txt = (string) $txt;
+    // an explicit digit right before "منت..." (e.g. "3 منتوجات")
+    if (preg_match('/(\d+)\s*منت/u', $txt, $m)) { $n = (int) $m[1]; if ($n >= 1 && $n <= 100) return $n; }
+    // a leading digit at the very start of the label
+    if (preg_match('/^\s*(\d+)\b/u', $txt, $m))  { $n = (int) $m[1]; if ($n >= 2 && $n <= 100) return $n; }
+    // dual form of منتج / منتوج ("...جين") => two
+    if (preg_match('/منت(?:و)?ج(?:ين|ان)/u', $txt)) { return 2; }
+    // Arabic number words (check longer/larger first)
+    $words = array('عشرة'=>10,'تسعة'=>9,'ثمانية'=>8,'سبعة'=>7,'ستة'=>6,'خمسة'=>5,
+                   'أربعة'=>4,'اربعة'=>4,'ثلاثة'=>3,'ثلاث'=>3,'اثنين'=>2,'اثنان'=>2,'واحد'=>1);
+    foreach ($words as $w => $n) {
+        if (function_exists('mb_strpos') ? (mb_strpos($txt, $w) !== false) : (strpos($txt, $w) !== false)) {
+            return $n;
+        }
+    }
+    return 1;
+}
 
 $single = q_norm_date(q_pick(array('date', 'day', 'jour')));
 $from   = q_norm_date(q_pick(array('from', 'date_from', 'du', 'start', 'debut', 'min_date')));
@@ -179,20 +202,20 @@ if ($res) {
         if ($info) { $ref = $info['ref']; }
 
         // DATA MODEL (both columns are varchar in `lists`):
-        //   price     = the order TOTAL montant (COD, delivery included). e.g. order
-        //               651837 stores "349" = exactly what imrashop shows.
-        //   quantity  = a human-readable label, NOT a number, e.g.
-        //               "منتج واحد ب 349 درهم" ("one product at 349 dirham"). The
-        //               number inside it is the UNIT price. So the real item count is
-        //               count = round(montant / unit_price).
+        //   price     = the order line TOTAL montant (COD, delivery included). Summed
+        //               over the day this equals imrashop's مجموع المبيعات exactly.
+        //   quantity  = a human-readable label whose WORD is the item count, e.g.
+        //               "منتوج واحد ب 199 درهم" (1) / "منتوجين ب 298 درهم" (2) /
+        //               "3 منتوجات ب 417 درهم" (3). The number after "ب" is the line
+        //               total, not the count.
         //
         // TOP JEMLA computes revenue = price * qty, so we send:
-        //   qty   = real item count (derived above)
+        //   qty   = real item count (parsed from the label word) -> matches imrashop
         //   price = net unit price = (montant - delivery) / count
-        // => revenue = qty * price = net montant (matches imrashop, delivery excl.)
+        // => revenue = qty * price = net montant (delivery excl.), independent of count
 
-        // order total. `price` is varchar and old rows can hold junk (huge numbers,
-        // negatives); guard so one corrupt row can't blow up the daily total.
+        // order line total. `price` is varchar and old rows can hold junk (huge
+        // numbers, negatives); guard so one corrupt row can't blow up the daily total.
         $montant = (float) $r['price'];
         if ($montant < 0 || $montant > 100000) { $montant = 0; }   // corrupt -> neutralise
         $livr = (float) $r['livr'];
@@ -200,21 +223,8 @@ if ($res) {
         if ($net < 0) { $net = $montant; }            // bogus delivery fee -> keep gross
         $net  = round($net, 2);
 
-        // unit price = the number inside the `quantity` label (prefer the one just
-        // before "درهم"; fall back to the first number in the string).
-        $qtxt = (string) $r['qty'];
-        $unit = 0.0;
-        if (preg_match('/([0-9]+(?:[.,][0-9]+)?)\s*درهم/u', $qtxt, $mm) ||
-            preg_match('/([0-9]+(?:[.,][0-9]+)?)/', $qtxt, $mm)) {
-            $unit = (float) str_replace(',', '.', $mm[1]);
-        }
-
-        // count = round(total / unit), guarded to a sane 1..50 range (default 1).
-        $count = 1;
-        if ($unit > 0 && $montant > 0) {
-            $c = (int) round($montant / $unit);
-            if ($c >= 1 && $c <= 50) { $count = $c; }
-        }
+        // real item count parsed from the Arabic label ("واحد"=1, "...جين"=2, "3 ..."=3)
+        $count = parse_count($r['qty']);
 
         // net unit price so that price * count == net montant.
         $qty   = $count;
@@ -249,8 +259,7 @@ if ($res) {
                 'quantity_raw'=> (string) $r['qty'],   // exactly what `lists.quantity` holds
                 'montant'     => $montant,             // `lists.price` (order total, COD)
                 'livr'        => $livr,
-                'unit'        => $unit,                // unit price parsed from the label
-                'qty_sent'    => $qty,                 // real item count we send
+                'qty_sent'    => $qty,                 // real item count (parsed from label)
                 'price_sent'  => $price,               // net unit price we send
             );
         }
