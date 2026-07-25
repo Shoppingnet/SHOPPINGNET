@@ -13,12 +13,12 @@
  *   - none given => last DEFAULT_DAYS days. TOP JEMLA de-dups on external_id.
  *
  * Output (one object per delivered sale line):
- *   { external_id, date, product, ref (SKU), qty, price }
+ *   { external_id, order_no, date, delivered_date, created_date, product, ref,
+ *     qty, price, customer, phone, city, employee, image }
  *
- * ref (SKU) is resolved from the `products` catalog by matching the product
- * name. Matching is done in PHP on a NORMALISED name (drops "(...)" pack notes,
- * dots and extra spaces) so almost every line carries its SKU even when the
- * stored name differs slightly from the catalog.
+ *   - date          = delivery/distribution date (revenue day) = DATE(delivred_at)
+ *   - price         = net product price = sale price minus the delivery fee
+ *   - ref (SKU)     = resolved from the `products` catalog by normalised name
  *
  * "Delivered" = the order's `delivred_at` is set (and not cancelled/deleted).
  * SELECT only — never writes. DB credentials are read at runtime from an
@@ -29,6 +29,7 @@
 /* ===== CONFIG ===== */
 $SECRET       = 'tj_imrashop_9F3kZq7Lx2Wp';  // <-- secret to give TOP JEMLA
 $DEFAULT_DAYS = 90;                           // <-- window when no date/range asked
+$EMP_COL      = '';                           // <-- employee/agent column in `lists`, if any (else '')
 /* ================= */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -67,6 +68,14 @@ function norm_name($s) {
     if (function_exists('mb_strtolower')) { $s = mb_strtolower($s, 'UTF-8'); }
     return $s;
 }
+// clean the displayed product name: strip a stray leading/trailing quantity marker
+// like "x", "1x", "2 x" (the quantity belongs in `qty`, not in the name).
+function clean_product($s) {
+    $s = trim((string) $s);
+    $s = preg_replace('/^\s*\d*\s*[xX]\s+/u', '', $s);   // leading "x " / "1x " / "2 x "
+    $s = preg_replace('/\s+\d*\s*[xX]\s*$/u', '', $s);   // trailing " x" / " 1x"
+    return trim($s);
+}
 
 $single = q_norm_date(q_pick(array('date', 'day', 'jour')));
 $from   = q_norm_date(q_pick(array('from', 'date_from', 'du', 'start', 'debut', 'min_date')));
@@ -103,8 +112,8 @@ mysqli_set_charset($cn, 'utf8mb4');
 mysqli_query($cn, "SET NAMES utf8mb4");
 
 // --- build product-name -> {ref, price} map (exact + normalised keys) ---
-$prodByName = array();   // exact name
-$prodByNorm = array();   // normalised name
+$prodByName = array();
+$prodByNorm = array();
 $pr = mysqli_query($cn, "SELECT name, reference, price FROM `products`");
 if ($pr) {
     while ($row = mysqli_fetch_assoc($pr)) {
@@ -118,12 +127,19 @@ if ($pr) {
 }
 
 // --- delivered orders ---
-$sql = "SELECT l.id                AS external_id,
-               DATE(l.delivred_at) AS `date`,
-               l.product           AS product,
-               l.quantity          AS qty,
-               l.price             AS price,
-               l.prix_de_laivraison AS livr
+$empSelect = ($EMP_COL !== '') ? ", l.`$EMP_COL` AS employee" : "";
+$sql = "SELECT l.id                 AS external_id,
+               l.id_order           AS order_no,
+               DATE(l.delivred_at)  AS delivered_date,
+               DATE(l.created_at)   AS created_date,
+               l.product            AS product,
+               l.quantity           AS qty,
+               l.price              AS price,
+               l.prix_de_laivraison AS livr,
+               l.name               AS customer,
+               l.tel                AS phone,
+               l.city               AS city
+               $empSelect
         FROM `lists` l
         WHERE l.delivred_at IS NOT NULL
           AND l.canceled_at IS NULL
@@ -136,16 +152,20 @@ $res = mysqli_query($cn, $sql);
 $out = array();
 if ($res) {
     while ($r = mysqli_fetch_assoc($res)) {
-        $product = (string) $r['product'];
-        // resolve product info (ref + catalog price): exact name first, then normalised
+        $rawProduct = (string) $r['product'];
+        $product    = clean_product($rawProduct);
+
+        // resolve ref from the catalog (exact name first, then normalised); match on
+        // the raw and the cleaned name to maximise hits.
+        $ref  = '';
         $info = null;
-        if ($product !== '' && isset($prodByName[$product])) {
-            $info = $prodByName[$product];
-        } else {
-            $k = norm_name($product);
-            if ($k !== '' && isset($prodByNorm[$k])) { $info = $prodByNorm[$k]; }
+        foreach (array($rawProduct, $product) as $cand) {
+            if ($cand === '') { continue; }
+            if (isset($prodByName[$cand])) { $info = $prodByName[$cand]; break; }
+            $k = norm_name($cand);
+            if ($k !== '' && isset($prodByNorm[$k])) { $info = $prodByNorm[$k]; break; }
         }
-        $ref = $info ? $info['ref'] : '';
+        if ($info) { $ref = $info['ref']; }
 
         $qty = (float) $r['qty'];
         if ($qty <= 0) { $qty = 1; }
@@ -154,15 +174,28 @@ if ($res) {
         // A 0 / empty sale price stays 0 on purpose (the order may be returned).
         $gross = (float) $r['price'];
         $price = $gross - (float) $r['livr'];
-        if ($price < 0) { $price = $gross; }   // safety: never go negative
+        if ($price < 0) { $price = $gross; }
         $price = round($price, 2);
+
+        $ddate = (string) $r['delivered_date'];
+        $orderNo = (string) $r['order_no'];
+        if ($orderNo === '' || $orderNo === '0') { $orderNo = (string) $r['external_id']; }
+
         $out[] = array(
-            'external_id' => (string) $r['external_id'],
-            'date'        => (string) $r['date'],
-            'product'     => $product,
-            'ref'         => $ref,
-            'qty'         => $qty,
-            'price'       => $price,
+            'external_id'    => (string) $r['external_id'],
+            'order_no'       => $orderNo,
+            'date'           => $ddate,                       // accounting date = delivery date
+            'delivered_date' => $ddate,
+            'created_date'   => (string) $r['created_date'],
+            'product'        => $product,
+            'ref'            => $ref,
+            'qty'            => $qty,
+            'price'          => $price,
+            'customer'       => (string) $r['customer'],
+            'phone'          => (string) $r['phone'],
+            'city'           => (string) $r['city'],
+            'employee'       => isset($r['employee']) ? (string) $r['employee'] : '',
+            'image'          => '',                           // optional; TJ uses matched product image
         );
     }
 }
