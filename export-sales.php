@@ -28,6 +28,11 @@
  * -----------------------------------------------------------------------------
  */
 
+// This server runs with opcache.validate_timestamps=0 (compiled bytecode is
+// cached and file changes are ignored until FPM reload). Evict our own cached
+// copy on every request so a re-deployed file is always picked up fresh.
+if (function_exists('opcache_invalidate')) { @opcache_invalidate(__FILE__, true); }
+
 /* ===== CONFIG ===== */
 $SECRET       = 'tj_imrashop_9F3kZq7Lx2Wp';  // <-- secret to give TOP JEMLA
 $DEFAULT_DAYS = 90;                           // <-- window when no date/range asked
