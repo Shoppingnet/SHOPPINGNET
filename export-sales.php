@@ -151,7 +151,11 @@ $sql = "SELECT l.id                 AS external_id,
 
 $res = mysqli_query($cn, $sql);
 
-$out = array();
+$DEBUG    = (q_pick(array('debug')) !== '');   // &debug=1 -> diagnostic output
+$refFilt  = q_pick(array('ref'));              // &ref=SN1023 -> only that ref, per-line
+
+$out     = array();
+$dbgRows = array();
 if ($res) {
     while ($r = mysqli_fetch_assoc($res)) {
         $rawProduct = (string) $r['product'];
@@ -216,7 +220,66 @@ if ($res) {
             'employee'       => isset($r['employee']) ? (string) $r['employee'] : '',
             'image'          => '',                           // optional; TJ uses matched product image
         );
+
+        if ($DEBUG) {
+            $dbgRows[] = array(
+                'external_id' => (string) $r['external_id'],
+                'ref'         => $ref,
+                'product'     => $product,
+                'quantity_raw'=> (string) $r['qty'],   // exactly what `lists.quantity` holds
+                'montant'     => $montant,             // `lists.price` (order total, COD)
+                'livr'        => $livr,
+                'qty_sent'    => $qty,                 // count we send after the guard
+                'price_sent'  => $price,               // unit price we send
+                'clamped'     => ((int) $r['qty'] !== $qty) ? 1 : 0,
+            );
+        }
     }
+}
+
+if ($DEBUG) {
+    // filter to one ref if asked
+    if ($refFilt !== '') {
+        $keep = array();
+        foreach ($dbgRows as $d) { if ($d['ref'] === $refFilt) { $keep[] = $d; } }
+        $dbgRows = $keep;
+    }
+    // per-ref aggregation: line count, raw-quantity sum, sent-quantity sum, revenue
+    $agg = array();
+    foreach ($dbgRows as $d) {
+        $k = $d['ref'] !== '' ? $d['ref'] : ('(no-ref) ' . $d['product']);
+        if (!isset($agg[$k])) {
+            $agg[$k] = array('ref' => $d['ref'], 'product' => $d['product'],
+                             'lines' => 0, 'qty_raw_sum' => 0, 'qty_sent_sum' => 0,
+                             'revenue_sent' => 0.0, 'clamped_lines' => 0);
+        }
+        $agg[$k]['lines']++;
+        $agg[$k]['qty_raw_sum']  += (int) $d['quantity_raw'];
+        $agg[$k]['qty_sent_sum'] += (int) $d['qty_sent'];
+        $agg[$k]['revenue_sent'] += (float) $d['qty_sent'] * (float) $d['price_sent'];
+        $agg[$k]['clamped_lines']+= (int) $d['clamped'];
+    }
+    foreach ($agg as &$a) { $a['revenue_sent'] = round($a['revenue_sent'], 2); }
+    unset($a);
+    $summary = array_values($agg);
+    // sort by line count desc so the busiest products are first
+    usort($summary, function ($x, $y) { return $y['lines'] - $x['lines']; });
+
+    $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0;
+    foreach ($dbgRows as $d) {
+        $totalRevenue += (float) $d['qty_sent'] * (float) $d['price_sent'];
+        $totalLines++; $totalQty += (int) $d['qty_sent'];
+    }
+
+    echo json_encode(array(
+        'condition'      => $cond,
+        'total_lines'    => $totalLines,
+        'total_qty_sent' => $totalQty,
+        'total_revenue'  => round($totalRevenue, 2),
+        'by_ref'         => $summary,
+        'rows'           => ($refFilt !== '') ? $dbgRows : 'add &ref=SNxxxx to see per-line detail',
+    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
 }
 
 echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
