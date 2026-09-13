@@ -29,8 +29,9 @@
  *   - date          = delivery/distribution date (revenue day) = DATE(delivred_at)
  *   - qty           = real quantity from `multisale.quanity` (NOT the lists.quantity
  *                     label nor a montant/catalog guess, both of which were unreliable)
- *   - price         = GROSS unit price (full order amount, delivery INCLUDED); summed
- *                     as qty*price over an order == montant == imrashop "مجموع المبيعات"
+ *   - price         = GROSS unit price = (multisale line total / qty), delivery INCLUDED.
+ *                     SUM(qty*price) over an order == SUM(multisale.price) == imrashop
+ *                     "مجموع المبيعات" (lists.price under-reports multi-product orders)
  *   - livraison     = the order's delivery (on the first line only). TOP JEMLA computes
  *                     net = SUM(qty*price) - livraison == imrashop "الصافي"
  *   - ref (SKU)     = `products.reference` via `multisale.productID` (exact, by id)
@@ -422,8 +423,13 @@ if ($res) {
                 $pn = ($m['p_name'] !== null && $m['p_name'] !== '')
                         ? (string) $m['p_name'] : clean_product((string) $r['product']);
                 $rf = ($m['p_ref'] !== null) ? (string) $m['p_ref'] : '';
+                // multisale.price is the LINE TOTAL for that product (already covers all its
+                // units) — NOT a unit price. It is the reliable per-product sale amount;
+                // lists.price only records part of a multi-product order.
+                $lineTotal = (float) $m['ms_price'];
+                if ($lineTotal < 0 || $lineTotal > 1000000) { $lineTotal = 0; }
                 $lines[] = array('product' => $pn, 'ref' => $rf, 'qty' => $q,
-                                 'gross' => (float) $m['ms_price'] * $q);
+                                 'gross' => $lineTotal);
             }
         } else {
             // no multisale row: one line from the lists header (qty defaults to 1),
@@ -447,14 +453,12 @@ if ($res) {
         foreach ($lines as $idx => $ln) {
             $q = $ln['qty'];
             if ($type === 'normal') {
-                // price = GROSS unit price (full order amount incl delivery), distributed
-                // across the order's lines by weight so SUM(qty*price) == montant
-                // (== imrashop "مجموع المبيعات"). Delivery is carried separately in
-                // `livraison`; TOP JEMLA computes net = SUM(qty*price) - livraison
-                // (== imrashop "الصافي"). We no longer pre-subtract delivery from price.
-                $lineGross = ($grossSum > 0) ? round($montant * $ln['gross'] / $grossSum, 2)
-                                             : round($montant / $nLines, 2);
-                $price = ($q > 0) ? round($lineGross / $q, 2) : $lineGross;
+                // GROSS line total straight from multisale (ms.price). SUM over the order
+                // == imrashop "مجموع المبيعات" (delivery included). lists.price is NOT used
+                // for the amount — it under-reports multi-product orders. Delivery stays in
+                // `livraison`; TOP JEMLA computes net = SUM(qty*price) - livraison ("الصافي").
+                $lineGross = $ln['gross'];                       // = ms.price (line total)
+                $price = ($q > 0) ? round($lineGross / $q, 2) : $lineGross;  // unit price
                 $lineLoss = 0.0;
             } else {
                 $price    = 0.0;                              // change/refund: not a real sale
