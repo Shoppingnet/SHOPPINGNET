@@ -253,6 +253,42 @@ if ($join !== '') {
     exit;
 }
 
+// ===== DIAGNOSTIC: &mismatch=1 — orders where lists.price != SUM(multisale) =====
+if (q_pick(array('mismatch')) !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+    $q = "SELECT l.id, l.price AS montant, l.prix_de_laivraison AS livr,
+                 COALESCE(SUM(ms.price * ms.quanity), 0) AS ms_sum, COUNT(ms.id) AS n_items
+          FROM `lists` l
+          LEFT JOIN `multisale` ms ON ms.listID = l.id
+          WHERE l.delivred_at IS NOT NULL AND l.canceled_at IS NULL AND l.deleted_at IS NULL AND $cond
+          GROUP BY l.id";
+    $rows = array(); $sumMont = 0.0; $sumMs = 0.0; $nMismatch = 0;
+    if ($rq = mysqli_query($cn, $q)) {
+        while ($g = mysqli_fetch_assoc($rq)) {
+            $mont = (float) $g['montant']; if ($mont > 100000 || $mont < -100000) { $mont = 0; }
+            $mss  = (float) $g['ms_sum'];
+            $sumMont += $mont; $sumMs += $mss;
+            if (abs($mont - $mss) > 1) {
+                $nMismatch++;
+                if (count($rows) < 40) {
+                    $rows[] = array('id' => $g['id'], 'lists_price' => $mont,
+                                    'multisale_sum' => round($mss, 2), 'diff' => round($mont - $mss, 2),
+                                    'n_items' => (int) $g['n_items'], 'livr' => (float) $g['livr']);
+                }
+            }
+        }
+    }
+    echo json_encode(array(
+        'condition'        => $cond,
+        'sum_lists_price'  => round($sumMont, 2),   // what total_gross currently uses
+        'sum_multisale'    => round($sumMs, 2),     // sum of real per-product prices
+        'diff'             => round($sumMont - $sumMs, 2),
+        'orders_mismatch'  => $nMismatch,
+        'examples'         => $rows,
+    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
+}
+
 // ===== DIAGNOSTIC: &dbcounts=1 — delivered-order count per database for $cond =====
 if (q_pick(array('dbcounts')) !== '') {
     header('Content-Type: application/json; charset=utf-8');
