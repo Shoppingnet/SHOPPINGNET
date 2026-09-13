@@ -14,7 +14,15 @@
  *
  * Output (one object per delivered sale line):
  *   { external_id, order_no, date, delivered_date, created_date, product, ref,
- *     qty, price, customer, phone, city, employee, image }
+ *     qty, price, type, livraison, loss, customer, phone, city, employee, image }
+ *
+ *   - type      = normal | change (تبديل) | remboursement (إرجاع), from montant sign:
+ *                   montant > 0 => normal ;  == 0 => change ;  < 0 => remboursement
+ *   - price     = net unit price for normal sales; 0 for change/remboursement
+ *   - livraison = delivery amount of the order
+ *   - loss      = خسارة for change/remboursement (0 for normal):
+ *                   change        => delivery
+ *                   remboursement => |montant| + delivery  (provisional)
  *
  *   - date          = delivery/distribution date (revenue day) = DATE(delivred_at)
  *   - qty           = trustworthy item count (corrupted quantity rows -> 1)
@@ -213,31 +221,61 @@ if ($res) {
         //   qty   = real item count      price = net unit price = (montant-delivery)/count
         // => revenue = qty * price = net montant (delivery excl.), independent of count
 
-        // order line total. `price` is varchar and old rows can hold junk (huge
-        // numbers, negatives); guard so one corrupt row can't blow up the daily total.
+        // ---- ORDER TYPE, from the sign of the line total (`lists.price`) ----
+        //   montant  > 0  => normal        (بيعة عادية)
+        //   montant == 0  => change        (تبديل: مقايضة، مامشاتش فلوس)
+        //   montant  < 0  => remboursement (إرجاع: رجعنا الفلوس للعميل، مسجّلة بالسالب)
+        // NOTE: we must NOT zero out negatives here (the old code did, which hid every
+        // refund and mixed it with the 0-DH exchanges). We only clamp absurd/corrupt
+        // magnitudes so one junk row can't blow up the totals.
         $montant = (float) $r['price'];
-        if ($montant < 0 || $montant > 100000) { $montant = 0; }   // corrupt -> neutralise
+        if ($montant > 100000 || $montant < -100000) { $montant = 0; }   // corrupt -> neutralise
         $livr = (float) $r['livr'];
-        $net  = $montant - $livr;
-        if ($net < 0) { $net = $montant; }            // bogus delivery fee -> keep gross
-        $net  = round($net, 2);
+        if ($livr < 0 || $livr > 100000) { $livr = 0.0; }
 
-        // Item count — two candidate methods (imrashop uses the catalog one):
-        //   word : parse the label ("واحد"=1, "...جين"=2, "3 ..."=3)
-        //   cat  : round(montant / catalog_unit_price) from the `products` table
+        if ($montant > 0)      { $type = 'normal'; }
+        elseif ($montant < 0)  { $type = 'remboursement'; }
+        else                   { $type = 'change'; }
+
         $countWord = parse_count($r['qty']);
         $catalog   = ($info && isset($info['price'])) ? (float) $info['price'] : 0.0;
         $countCat  = 0;
-        if ($catalog > 0 && $montant > 0) {
-            $cc = (int) round($montant / $catalog);
-            if ($cc >= 1 && $cc <= 50) { $countCat = $cc; }
-        }
-        // primary: catalog-based; fall back to the label word, then 1.
-        $count = $countCat > 0 ? $countCat : ($countWord > 0 ? $countWord : 1);
 
-        // net unit price so that price * count == net montant.
-        $qty   = $count;
-        $price = ($count > 0) ? round($net / $count, 2) : $net;
+        if ($type === 'normal') {
+            // net = product revenue (delivery excluded) — matches imrashop "الصافي".
+            $net = $montant - $livr;
+            if ($net < 0) { $net = $montant; }        // bogus delivery fee -> keep gross
+            $net = round($net, 2);
+
+            // Item count — catalog method (imrashop's): round(montant / unit price);
+            // fall back to the label word, then 1.
+            if ($catalog > 0 && $montant > 0) {
+                $cc = (int) round($montant / $catalog);
+                if ($cc >= 1 && $cc <= 50) { $countCat = $cc; }
+            }
+            $count = $countCat > 0 ? $countCat : ($countWord > 0 ? $countWord : 1);
+
+            $qty   = $count;
+            $price = ($count > 0) ? round($net / $count, 2) : $net;  // price*qty == net
+            $loss  = 0.0;
+        } else {
+            // change / remboursement: NOT a real sale. price=0 so it never inflates
+            // revenue in TOP JEMLA; the money impact is carried in `loss` instead.
+            // qty defaults to 1 (these are single-item; the catalog guess is unreliable
+            // with a 0/negative montant and used to wrongly inflate the count/cost).
+            $count = 1;
+            $qty   = 1;
+            $price = 0.0;
+            $net   = 0.0;
+            if ($type === 'change') {
+                // exchange: we paid to ship the replacement -> loss = delivery.
+                $loss = round($livr, 2);
+            } else {
+                // refund: money returned to the customer + the delivery we ate.
+                // (provisional formula — refine once the delivery source is confirmed.)
+                $loss = round(abs($montant) + $livr, 2);
+            }
+        }
 
         $ddate = (string) $r['delivered_date'];
         $orderNo = (string) $r['order_no'];
@@ -253,6 +291,9 @@ if ($res) {
             'ref'            => $ref,
             'qty'            => $qty,
             'price'          => $price,
+            'type'           => $type,                        // normal | change | remboursement
+            'livraison'      => round($livr, 2),              // delivery amount for this order
+            'loss'           => $loss,                        // خسارة (تبديل/إرجاع); 0 for normal
             'customer'       => (string) $r['customer'],
             'phone'          => (string) $r['phone'],
             'city'           => (string) $r['city'],
@@ -273,6 +314,8 @@ if ($res) {
                 'qty_cat'     => $countCat,            // round(montant / catalog)
                 'qty_sent'    => $qty,                 // the one we actually send
                 'price_sent'  => $price,               // net unit price we send
+                'type'        => $type,                // normal | change | remboursement
+                'loss'        => $loss,                // خسارة for change/remboursement
             );
         }
     }
@@ -304,13 +347,34 @@ if ($DEBUG) {
     usort($summary, function ($x, $y) { return $y['lines'] - $x['lines']; });
 
     $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0; $totalWord = 0; $totalCat = 0;
+    // per-type breakdown (normal / change / remboursement)
+    $byType = array(
+        'normal'        => array('count' => 0, 'revenue' => 0.0, 'loss' => 0.0),
+        'change'        => array('count' => 0, 'revenue' => 0.0, 'loss' => 0.0),
+        'remboursement' => array('count' => 0, 'revenue' => 0.0, 'loss' => 0.0),
+    );
+    $specialRows = array();   // the change/remboursement lines, listed out
     foreach ($dbgRows as $d) {
         $totalRevenue += (float) $d['qty_sent'] * (float) $d['price_sent'];
         $totalLines++;
         $totalQty  += (int) $d['qty_sent'];
         $totalWord += (int) $d['qty_word'];
         $totalCat  += (int) ($d['qty_cat'] > 0 ? $d['qty_cat'] : 1);
+        $t = isset($d['type']) ? $d['type'] : 'normal';
+        if (!isset($byType[$t])) { $byType[$t] = array('count'=>0,'revenue'=>0.0,'loss'=>0.0); }
+        $byType[$t]['count']++;
+        $byType[$t]['revenue'] += (float) $d['qty_sent'] * (float) $d['price_sent'];
+        $byType[$t]['loss']    += (float) $d['loss'];
+        if ($t !== 'normal') {
+            $specialRows[] = array(
+                'external_id' => $d['external_id'], 'ref' => $d['ref'],
+                'product' => $d['product'], 'type' => $t,
+                'montant' => $d['montant'], 'livr' => $d['livr'], 'loss' => $d['loss'],
+            );
+        }
     }
+    foreach ($byType as &$bt) { $bt['revenue'] = round($bt['revenue'],2); $bt['loss'] = round($bt['loss'],2); }
+    unset($bt);
 
     echo json_encode(array(
         'condition'         => $cond,
@@ -319,6 +383,8 @@ if ($DEBUG) {
         'total_qty_by_word' => $totalWord,  // label-word method
         'total_qty_by_cat'  => $totalCat,   // montant/catalog method  <-- compare to imrashop
         'total_revenue'     => round($totalRevenue, 2),
+        'by_type'           => $byType,       // normal / change / remboursement (count, revenue, loss)
+        'special_orders'    => $specialRows,  // every تبديل/إرجاع line with its loss
         'by_ref'            => $summary,
         'rows'              => ($refFilt !== '') ? $dbgRows : 'add &ref=SNxxxx to see per-line detail',
     ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
