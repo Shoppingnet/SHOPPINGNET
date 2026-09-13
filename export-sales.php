@@ -168,7 +168,12 @@ if ($find !== '') {
             $dbs[] = $dn;
         }
     }
-    $out = array('connected_db' => $DB_NAME, 'db_user' => $DB_USER, 'databases' => $dbs, 'matches' => array());
+    $tables = array();
+    if ($rt = mysqli_query($cn, "SHOW TABLES FROM `$DB_NAME`")) {
+        while ($row = mysqli_fetch_row($rt)) { $tables[] = $row[0]; }
+    }
+    $out = array('connected_db' => $DB_NAME, 'db_user' => $DB_USER, 'databases' => $dbs,
+                 'tables_in_connected_db' => $tables, 'matches' => array());
     foreach ($dbs as $dn) {
         $chk = @mysqli_query($cn, "SHOW TABLES FROM `$dn` LIKE 'lists'");
         if (!$chk || mysqli_num_rows($chk) == 0) { continue; }
