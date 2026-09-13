@@ -29,8 +29,10 @@
  *   - date          = delivery/distribution date (revenue day) = DATE(delivred_at)
  *   - qty           = real quantity from `multisale.quanity` (NOT the lists.quantity
  *                     label nor a montant/catalog guess, both of which were unreliable)
- *   - price         = net unit price so qty * price == the line's share of the order's
- *                     net total (order total - delivery) => matches imrashop "الصافي"
+ *   - price         = GROSS unit price (full order amount, delivery INCLUDED); summed
+ *                     as qty*price over an order == montant == imrashop "مجموع المبيعات"
+ *   - livraison     = the order's delivery (on the first line only). TOP JEMLA computes
+ *                     net = SUM(qty*price) - livraison == imrashop "الصافي"
  *   - ref (SKU)     = `products.reference` via `multisale.productID` (exact, by id)
  *
  * "Delivered" = the order's `delivred_at` is set (and not cancelled/deleted).
@@ -409,11 +411,14 @@ if ($res) {
         foreach ($lines as $idx => $ln) {
             $q = $ln['qty'];
             if ($type === 'normal') {
-                // distribute the order's net across its lines by gross weight,
-                // so SUM(qty*price) == net (== imrashop "الصافي").
-                $lineNet = ($grossSum > 0) ? round($net * $ln['gross'] / $grossSum, 2)
-                                           : round($net / $nLines, 2);
-                $price = ($q > 0) ? round($lineNet / $q, 2) : $lineNet;  // qty*price == line net
+                // price = GROSS unit price (full order amount incl delivery), distributed
+                // across the order's lines by weight so SUM(qty*price) == montant
+                // (== imrashop "مجموع المبيعات"). Delivery is carried separately in
+                // `livraison`; TOP JEMLA computes net = SUM(qty*price) - livraison
+                // (== imrashop "الصافي"). We no longer pre-subtract delivery from price.
+                $lineGross = ($grossSum > 0) ? round($montant * $ln['gross'] / $grossSum, 2)
+                                             : round($montant / $nLines, 2);
+                $price = ($q > 0) ? round($lineGross / $q, 2) : $lineGross;
                 $lineLoss = 0.0;
             } else {
                 $price    = 0.0;                              // change/refund: not a real sale
@@ -452,7 +457,8 @@ if ($res) {
                     'montant'     => $montant,
                     'livr'        => $livr,
                     'qty_sent'    => $q,
-                    'price_sent'  => $price,
+                    'price_sent'  => $price,        // GROSS unit price (incl delivery)
+                    'line_livr'   => $lineLivr,     // delivery for this order (first line only)
                     'type'        => $type,
                     'loss'        => $lineLoss,
                     'src'         => empty($items) ? 'lists' : 'multisale',
@@ -487,7 +493,7 @@ if ($DEBUG) {
     // sort by line count desc so the busiest products are first
     usort($summary, function ($x, $y) { return $y['lines'] - $x['lines']; });
 
-    $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0;
+    $totalRevenue = 0.0; $totalLines = 0; $totalQty = 0; $totalLivr = 0.0;
     // per-type breakdown (normal / change / remboursement)
     $byType = array(
         'normal'        => array('count' => 0, 'revenue' => 0.0, 'loss' => 0.0),
@@ -499,6 +505,7 @@ if ($DEBUG) {
         $totalRevenue += (float) $d['qty_sent'] * (float) $d['price_sent'];
         $totalLines++;
         $totalQty  += (int) $d['qty_sent'];
+        $totalLivr += (float) (isset($d['line_livr']) ? $d['line_livr'] : 0);
         $t = isset($d['type']) ? $d['type'] : 'normal';
         if (!isset($byType[$t])) { $byType[$t] = array('count'=>0,'revenue'=>0.0,'loss'=>0.0); }
         $byType[$t]['count']++;
@@ -519,7 +526,10 @@ if ($DEBUG) {
         'condition'         => $cond,
         'total_lines'       => $totalLines,   // output lines (one per multisale item)
         'total_qty_sent'    => $totalQty,     // sum of real quantities
-        'total_revenue'     => round($totalRevenue, 2),
+        'total_gross'       => round($totalRevenue, 2),               // SUM(qty*price) = مجموع المبيعات
+        'total_livraison'   => round($totalLivr, 2),                  // = سعر التوصيل
+        'total_net'         => round($totalRevenue - $totalLivr, 2),  // gross - delivery = الصافي
+        'total_revenue'     => round($totalRevenue - $totalLivr, 2),  // net (kept for back-compat)
         'by_type'           => $byType,       // normal / change / remboursement (count, revenue, loss)
         'special_orders'    => $specialRows,  // every تبديل/إرجاع line with its loss
         'by_ref'            => $summary,
