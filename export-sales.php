@@ -191,6 +191,37 @@ if ($find !== '') {
     exit;
 }
 
+// ===== DIAGNOSTIC: &probe=<id,id> — find an order across order/item tables =====
+// For each candidate table, dump rows where ANY column equals one of the ids, so we
+// can see where a manually-entered ('page') order stores its product/quantity.
+$probe = q_pick(array('probe'));
+if ($probe !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+    $ids = array();
+    foreach (explode(',', $probe) as $x) { $x = (int) trim($x); if ($x > 0) { $ids[] = $x; } }
+    $idlist = $ids ? implode(',', $ids) : '0';
+    $cand = array('lists', 'outside_orders', 'sortielistproducts', 'multisale', 'new', 'sentlists');
+    $res = array('ids' => $ids, 'results' => array());
+    foreach ($cand as $tb) {
+        $cols = array();
+        if ($rc = @mysqli_query($cn, "SHOW COLUMNS FROM `$DB_NAME`.`$tb`")) {
+            while ($cr = mysqli_fetch_assoc($rc)) { $cols[] = $cr['Field']; }
+        } else { $res['results'][$tb] = 'no such table'; continue; }
+        $ors = array();
+        foreach ($cols as $c) { $ors[] = "`$c` IN ($idlist)"; }
+        $where = $ors ? implode(' OR ', $ors) : '0';
+        $rows = array();
+        if ($rr = @mysqli_query($cn, "SELECT * FROM `$DB_NAME`.`$tb` WHERE $where LIMIT 30")) {
+            while ($row = mysqli_fetch_assoc($rr)) { $rows[] = $row; }
+            $res['results'][$tb] = array('columns' => $cols, 'matches' => $rows);
+        } else {
+            $res['results'][$tb] = array('columns' => $cols, 'error' => mysqli_error($cn));
+        }
+    }
+    echo json_encode($res, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
+}
+
 // ===== DIAGNOSTIC: &dbcounts=1 — delivered-order count per database for $cond =====
 if (q_pick(array('dbcounts')) !== '') {
     header('Content-Type: application/json; charset=utf-8');
