@@ -222,6 +222,32 @@ if ($probe !== '') {
     exit;
 }
 
+// ===== DIAGNOSTIC: &join=<id,id> — order + its multisale line items joined to products =====
+$join = q_pick(array('join'));
+if ($join !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+    $ids = array();
+    foreach (explode(',', $join) as $x) { $x = (int) trim($x); if ($x > 0) { $ids[] = $x; } }
+    $res = array();
+    foreach ($ids as $oid) {
+        $entry = array('order_id' => $oid);
+        $rs = @mysqli_query($cn, "SELECT id, name, product, quantity, price, prix_de_laivraison, delivred_at FROM `$DB_NAME`.`lists` WHERE id = $oid");
+        $entry['lists'] = $rs ? mysqli_fetch_assoc($rs) : null;
+        $items = array();
+        $q = "SELECT ms.id AS ms_id, ms.productID, ms.price AS ms_price, ms.quanity AS ms_qty,
+                     p.name AS p_name, p.reference AS p_ref, p.price AS p_catalog
+              FROM `$DB_NAME`.`multisale` ms
+              LEFT JOIN `$DB_NAME`.`products` p ON p.id = ms.productID
+              WHERE ms.listID = $oid";
+        if ($ri = @mysqli_query($cn, $q)) { while ($row = mysqli_fetch_assoc($ri)) { $items[] = $row; } }
+        else { $entry['items_error'] = mysqli_error($cn); }
+        $entry['multisale_items'] = $items;
+        $res[] = $entry;
+    }
+    echo json_encode($res, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
+}
+
 // ===== DIAGNOSTIC: &dbcounts=1 — delivered-order count per database for $cond =====
 if (q_pick(array('dbcounts')) !== '') {
     header('Content-Type: application/json; charset=utf-8');
