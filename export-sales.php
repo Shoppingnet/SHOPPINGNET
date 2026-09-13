@@ -149,6 +149,43 @@ if (!$cn) { http_response_code(500); echo '[]'; exit; }
 mysqli_set_charset($cn, 'utf8mb4');
 mysqli_query($cn, "SET NAMES utf8mb4");
 
+// ===== DIAGNOSTIC: &find=<id,id,...> — locate orders across ALL databases =====
+// Dumps the raw `lists` row(s) for the given imrashop order numbers (id_order) or
+// row ids, from every database that has a `lists` table, so we can see exactly
+// where an order lives and which column (delivred_at / canceled_at / deleted_at /
+// source / موزّع) keeps it out of the normal export. Read-only, key-gated.
+$find = q_pick(array('find'));
+if ($find !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+    $ids = array();
+    foreach (explode(',', $find) as $x) { $x = (int) trim($x); if ($x > 0) { $ids[] = $x; } }
+    $idlist = $ids ? implode(',', $ids) : '0';
+    $dbs = array();
+    if ($rd = mysqli_query($cn, "SHOW DATABASES")) {
+        while ($row = mysqli_fetch_row($rd)) {
+            $dn = $row[0];
+            if (in_array($dn, array('information_schema', 'mysql', 'performance_schema', 'sys'))) { continue; }
+            $dbs[] = $dn;
+        }
+    }
+    $out = array('connected_db' => $DB_NAME, 'db_user' => $DB_USER, 'databases' => $dbs, 'matches' => array());
+    foreach ($dbs as $dn) {
+        $chk = @mysqli_query($cn, "SHOW TABLES FROM `$dn` LIKE 'lists'");
+        if (!$chk || mysqli_num_rows($chk) == 0) { continue; }
+        $rs = @mysqli_query($cn, "SELECT * FROM `$dn`.`lists` WHERE id_order IN ($idlist) OR id IN ($idlist)");
+        if ($rs) {
+            while ($row = mysqli_fetch_assoc($rs)) {
+                $row['__db'] = $dn;
+                $out['matches'][] = $row;
+            }
+        } else {
+            $out['matches'][] = array('__db' => $dn, '__error' => mysqli_error($cn));
+        }
+    }
+    echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
+}
+
 // --- build product-name -> {ref, price} map (exact + normalised keys) ---
 $prodByName = array();
 $prodByNorm = array();
