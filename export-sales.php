@@ -186,6 +186,31 @@ if ($find !== '') {
     exit;
 }
 
+// ===== DIAGNOSTIC: &dbcounts=1 — delivered-order count per database for $cond =====
+if (q_pick(array('dbcounts')) !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+    $dbs = array();
+    if ($rd = mysqli_query($cn, "SHOW DATABASES")) {
+        while ($row = mysqli_fetch_row($rd)) {
+            $dn = $row[0];
+            if (in_array($dn, array('information_schema', 'mysql', 'performance_schema', 'sys', 'phpmyadmin'))) { continue; }
+            $dbs[] = $dn;
+        }
+    }
+    $res = array('condition' => $cond, 'connected_db' => $DB_NAME, 'counts' => array());
+    foreach ($dbs as $dn) {
+        $chk = @mysqli_query($cn, "SHOW TABLES FROM `$dn` LIKE 'lists'");
+        if (!$chk || mysqli_num_rows($chk) == 0) { $res['counts'][$dn] = 'no lists table'; continue; }
+        $q = "SELECT COUNT(*) FROM `$dn`.`lists` l
+              WHERE l.delivred_at IS NOT NULL AND l.canceled_at IS NULL AND l.deleted_at IS NULL AND $cond";
+        $rs = @mysqli_query($cn, $q);
+        if ($rs) { $r0 = mysqli_fetch_row($rs); $res['counts'][$dn] = (int) $r0[0]; }
+        else     { $res['counts'][$dn] = 'ERR: ' . mysqli_error($cn); }
+    }
+    echo json_encode($res, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    exit;
+}
+
 // --- build product-name -> {ref, price} map (exact + normalised keys) ---
 $prodByName = array();
 $prodByNorm = array();
